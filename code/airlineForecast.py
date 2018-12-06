@@ -1,84 +1,68 @@
-import os
 import pandas as pd
 import numpy as np
 
-
 def airlineForecast(trainingDataFileName, validationDataFileName):
 
-    # import both the data into program
-    train_data = pd.read_csv(trainingDataFileName, sep = ',' , header= 0 )
-    valid_data = pd.read_csv(validationDataFileName, sep = ',' , header= 0 )
-
-    # convert the date into calculation possible format
+    train_data = getTrainedDataset(trainingDataFileName)
+    valid_data = getValidDataset(validationDataFileName)
+    final_data = getFinalBookingPerDepartureDate(train_data)
+    historical_data = pd.merge(train_data, final_data, how='left', on="departure_date")
+    getHistoricalAdditiveDemand(historical_data, valid_data)
+    getHistoricalMultiplicativeDemand(historical_data, valid_data)
+    
+def getTrainedDataset(trainingDataFileName):
+    # import data
+    train_data = pd.read_csv("../data/"+trainingDataFileName, sep = ',' , header= 0 )
+    # convert the date into datetime format
     train_data["departure_date"] = pd.to_datetime(train_data["departure_date"])
     train_data["booking_date"] = pd.to_datetime(train_data["booking_date"])
+    # add new column "days prior" to evaluate forecast data
+    train_data["days_prior"] = (train_data["departure_date"] - train_data["booking_date"]).dt.days
+    return train_data
+
+def getValidDataset(validationDataFileName):
+    # import data 
+    valid_data = pd.read_csv("../data/"+validationDataFileName, sep = ',' , header= 0 )
+    # convert the date into datetime format
     valid_data["departure_date"] = pd.to_datetime(valid_data["departure_date"])
     valid_data["booking_date"] = pd.to_datetime(valid_data["booking_date"])
-    valid_data["add_forecast"] = 0
-    valid_data["mul_forecast"] = 0
+    # add days_prior column to enable join with forecasted data
+    valid_data["days_prior"] = (valid_data["departure_date"] - valid_data["booking_date"]).dt.days
+    return valid_data[["departure_date","days_prior", "cum_bookings", "final_demand", "naive_forecast"]]
 
-    # changes in train_data data frame
-    # add new column "days prior"
-    train_data["days_prior"] = (train_data["departure_date"] - train_data["booking_date"]).dt.days
+def getHistoricalAdditiveDemand(historical_data, valid_data):
+    historical_data["net_book"] = historical_data["final_data"] - historical_data["cum_bookings"]
+    historical_data = historical_data[["days_prior", "net_book"]]
+    historical_data = historical_data["net_book"].groupby(historical_data["days_prior"]).mean().reset_index()
+    additive_data = pd.merge(valid_data, historical_data, how='left', on="days_prior")
+    additive_data = additive_data[additive_data.days_prior != 0]
+    additive_data["final_forecast"] = additive_data["cum_bookings"]+ additive_data["net_book"]
+    print("MASE - Additive Model " + str(calculateMASE(additive_data)))
+    
+def getHistoricalMultiplicativeDemand(historical_data, valid_data):
+    historical_data["multiplicative_rate"] = historical_data["cum_bookings"]/historical_data["final_data"]
+    historical_data = historical_data[["days_prior", "multiplicative_rate"]]
+    historical_data = historical_data["multiplicative_rate"].groupby(historical_data["days_prior"]).mean().reset_index()
+    multiplicative_data = pd.merge(valid_data, historical_data, how='left', on="days_prior")
+    multiplicative_data = multiplicative_data[multiplicative_data.days_prior != 0]
+    multiplicative_data["final_forecast"] = multiplicative_data["cum_bookings"]/multiplicative_data["multiplicative_rate"]
+    print("MASE - Multiplicative Model " + str(calculateMASE(multiplicative_data)))
 
-    # find net booking from cumulative bookings
-    train_data["net_book"] = train_data.groupby(["departure_date"])["cum_bookings"].diff()
+def getFinalBookingPerDepartureDate(final_data):
+    final_data = final_data.loc[final_data['days_prior'] == 0]
+    final_data["final_data"] = final_data["cum_bookings"]
+    return final_data[["departure_date", "final_data"]]
 
-    # Iterate over rows of Valid data
-    for index, row in valid_data.iterrows():
-        days_prior = (row["departure_date"] - row["booking_date"])
-        days_prior = days_prior.days
-        if days_prior == 0:
-            continue
-        else:
-            # Additive model
-            forecast_add = additiveBooking(train_data, days_prior)
-            valid_data.loc[index, "add_forecast"] = forecast_add + row["cum_bookings"]
-
-            # multiplicative model
-            forecast_mul = multiplicativeBooking(train_data, days_prior)
-            valid_data.loc[index, "mul_forecast"] = row["cum_bookings"] / forecast_mul
-
-    # calculate the MASE value
-    mase_add = calculateMASE(valid_data, "add_forecast")
-    mase_mul = calculateMASE(valid_data, "mul_forecast")
-    return mase_add
-
-
-def additiveBooking(train_data, days_prior):
-    # fetch the rows where days prior is less than or equal to 8
-    prior_train_data = train_data.loc[train_data["days_prior"] < days_prior]
-    prior_cum_book = prior_train_data.groupby(["departure_date"])["net_book"].sum().reset_index()
-
-    return prior_cum_book["net_book"].mean()
-
-
-def multiplicativeBooking(train_data, days_prior):
-    # fetch the rows where days prior is less than or equal to 8
-    prior_train_data = train_data.loc[train_data["days_prior"] == days_prior]
-    prior_total_book = train_data['cum_bookings'].groupby(train_data['departure_date']).max().reset_index()
-    prior_total_book.columns = ['departure_date', 'total_book']
-    prior_train_data = pd.merge(prior_train_data, prior_total_book, on="departure_date")
-    prior_train_data.drop(["booking_date", "net_book"], 1)      # not working please check
-    prior_train_data["book_rate"] = prior_train_data["cum_bookings"] / prior_train_data["total_book"]
-
-    return prior_train_data["book_rate"].mean()
-
-
-def calculateMASE(valid_data, forecast_column):
-    naive_error = abs(valid_data["final_demand"] - valid_data["naive_forecast"]).sum()
-
-    # replace all values, 0 by NaN, so that they will not be considered as a part of calculation
-    valid_data[forecast_column] = valid_data[forecast_column].replace(0, np.nan)
-    model_error = abs(valid_data["final_demand"] - valid_data[forecast_column]).sum()
-
-    # calculate MASE error
-    mase = (model_error / naive_error) * 100
+def calculateMASE(model_data):
+    model_data["naive_error"] = (model_data["final_demand"] - model_data["naive_forecast"]).abs()
+    model_data["forecast_error"] = (model_data["final_demand"] - model_data["final_forecast"]).abs()
+    naive_error = model_data["naive_error"].sum(axis=0)
+    model_error = model_data["forecast_error"].sum(axis=0)
+    # calculate MASE 
+    mase = (model_error/naive_error)
     return mase
 
-
 def main():
-    os.chdir("E:/SeattleU Education//1st Quarter, Fall18/IS-5201 Programming for Business Analytics/Group Project/data")
     airlineForecast('airline_booking_trainingData.csv', 'airline_booking_validationData.csv')
 
 
