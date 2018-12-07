@@ -9,6 +9,8 @@ def airlineForecast(trainingDataFileName, validationDataFileName):
     historical_data = pd.merge(train_data, final_data, how='left', on="departure_date")
     getHistoricalAdditiveDemand(historical_data, valid_data)
     getHistoricalMultiplicativeDemand(historical_data, valid_data)
+    getWeeklyAdditiveDemand(historical_data, valid_data)
+    getWeeklyMultiplicativeDemand(historical_data, valid_data)
     
 def getTrainedDataset(trainingDataFileName):
     # import data
@@ -28,7 +30,8 @@ def getValidDataset(validationDataFileName):
     valid_data["booking_date"] = pd.to_datetime(valid_data["booking_date"])
     # add days_prior column to enable join with forecasted data
     valid_data["days_prior"] = (valid_data["departure_date"] - valid_data["booking_date"]).dt.days
-    return valid_data[["departure_date","days_prior", "cum_bookings", "final_demand", "naive_forecast"]]
+    valid_data["day_of_week"] = (valid_data["booking_date"]).dt.dayofweek
+    return valid_data[["departure_date","days_prior", "cum_bookings", "final_demand", "naive_forecast", "day_of_week"]]
 
 def getHistoricalAdditiveDemand(historical_data, valid_data):
     historical_data["net_book"] = historical_data["final_data"] - historical_data["cum_bookings"]
@@ -47,6 +50,26 @@ def getHistoricalMultiplicativeDemand(historical_data, valid_data):
     multiplicative_data = multiplicative_data[multiplicative_data.days_prior != 0]
     multiplicative_data["final_forecast"] = multiplicative_data["cum_bookings"]/multiplicative_data["multiplicative_rate"]
     print("MASE - Multiplicative Model " + str(calculateMASE(multiplicative_data)))
+
+def getWeeklyAdditiveDemand(historical_data, valid_data):
+    historical_data["net_book"] = historical_data["final_data"] - historical_data["cum_bookings"]
+    historical_data["day_of_week"] = (historical_data["booking_date"]).dt.dayofweek
+    historical_data = historical_data[["days_prior", "day_of_week", "net_book"]]
+    historical_data = historical_data.groupby(["days_prior","day_of_week"]).mean().reset_index()
+    additive_data = pd.merge(valid_data, historical_data, how='left', on=["days_prior", "day_of_week"])
+    additive_data = additive_data[additive_data.days_prior != 0]
+    additive_data["final_forecast"] = additive_data["cum_bookings"]+ additive_data["net_book"]
+    print("MASE - Weekly Additive Model " + str(calculateMASE(additive_data)))
+
+def getWeeklyMultiplicativeDemand(historical_data, valid_data):
+    historical_data["multiplicative_rate"] = historical_data["cum_bookings"]/historical_data["final_data"]
+    historical_data["day_of_week"] = (historical_data["booking_date"]).dt.dayofweek
+    historical_data = historical_data[["days_prior", "day_of_week", "multiplicative_rate"]]
+    historical_data = historical_data.groupby(["days_prior","day_of_week"]).mean().reset_index()
+    multiplicative_data = pd.merge(valid_data, historical_data, how='left', on=["days_prior", "day_of_week"])
+    multiplicative_data = multiplicative_data[multiplicative_data.days_prior != 0]
+    multiplicative_data["final_forecast"] = multiplicative_data["cum_bookings"]/multiplicative_data["multiplicative_rate"]
+    print("MASE - Weekly Multiplicative Model " + str(calculateMASE(multiplicative_data)))
 
 def getFinalBookingPerDepartureDate(final_data):
     final_data = final_data.loc[final_data['days_prior'] == 0]
